@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+
+# Environment files (keep .env.example and .env.production template)
+.env
+.env.local
+.env.*.local
+!.env.example
+!.env.production
+
+# Dependencies (will be installed in container)
+node_modules
+vendor
+
+# Laravel storage (use Docker volumes in production)
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+bootstrap/cache/*
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build artifacts
+/public/build/
+/public/hot
+
+# Testing
+.phpunit.cache
+.phpunit.result.cache
+coverage/
+
+# Docker development files (not needed in production image)
+docker-compose.yml
+Dockerfile
+README.Docker.md
+
+# Certbot (handled by Docker volumes)
+/certbot/
+
+# Database dumps
+*.sql
+*.sql.gz
+
+# Documentation (optional - remove if you want docs in image)
+# PRODUCTION_DEPLOYMENT.md
+# PAYMENT_INTEGRATION.md
