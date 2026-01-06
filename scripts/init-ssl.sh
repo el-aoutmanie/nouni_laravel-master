@@ -50,7 +50,6 @@ docker compose -f $COMPOSE_FILE run --rm certbot certonly \
     --no-eff-email \
     --force-renewal \
     -d ${DOMAIN} \
-    -d www.${DOMAIN} \
     ${STAGING_FLAG}
 
 if [ $? -eq 0 ]; then
@@ -65,7 +64,7 @@ if [ $? -eq 0 ]; then
 server {
     listen 80;
     listen [::]:80;
-    server_name fhmaison.fr www.fhmaison.fr;
+    server_name fhmaison.fr;
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -82,7 +81,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name fhmaison.fr www.fhmaison.fr;
+    server_name fhmaison.fr;
 
     ssl_certificate /etc/letsencrypt/live/fhmaison.fr/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/fhmaison.fr/privkey.pem;
@@ -153,7 +152,6 @@ NGINXEOF
     echo ""
     echo "Your site is now available at:"
     echo "  https://fhmaison.fr"
-    echo "  https://www.fhmaison.fr"
     echo ""
     echo "HTTP automatically redirects to HTTPS"
     echo ""
