@@ -40,6 +40,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Copy application files
 COPY --chown=www-data:www-data . /var/www/html
 
+# Remove any .env files (will be mounted at runtime)
+RUN rm -f /var/www/html/.env /var/www/html/.env.example /var/www/html/database/database.sqlite
+
 # Set permissions
 RUN chown -R www-data:www-data /var/www/html \
     && chmod -R 755 /var/www/html/storage \

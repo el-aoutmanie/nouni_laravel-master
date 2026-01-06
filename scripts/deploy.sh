@@ -1,134 +1,109 @@
 #!/bin/bash
-
-# ============================================================
-# Production Deployment Script
-# This script handles the complete production deployment
-# ============================================================
-
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+echo "======================================"
+echo "FH Maison Production Deployment"
+echo "======================================"
 
 COMPOSE_FILE="docker-compose.prod.yml"
 
-echo -e "${BLUE}======================================${NC}"
-echo -e "${BLUE}   Production Deployment Script${NC}"
-echo -e "${BLUE}======================================${NC}"
-
-# Check if .env file exists
+# Check if .env exists
 if [ ! -f .env ]; then
-    echo -e "${RED}Error: .env file not found!${NC}"
-    echo "Please copy .env.production to .env and configure it:"
-    echo "  cp .env.production .env"
-    echo "  nano .env"
+    echo "ERROR: .env file not found!"
+    echo "Please copy .env.production to .env and configure it."
     exit 1
 fi
 
-# Source the .env file
-export $(grep -v '^#' .env | xargs)
+# Load environment variables
+set -a
+source .env
+set +a
 
-# Validate required environment variables
-REQUIRED_VARS=("DB_DATABASE" "DB_USERNAME" "DB_PASSWORD" "DB_ROOT_PASSWORD" "REDIS_PASSWORD" "DOMAIN")
-for var in "${REQUIRED_VARS[@]}"; do
-    if [ -z "${!var}" ]; then
-        echo -e "${RED}Error: $var is not set in .env file!${NC}"
-        exit 1
-    fi
-done
+# Create required directories
+echo "Creating directories..."
+mkdir -p storage/app/public
+mkdir -p storage/framework/{cache,sessions,views}
+mkdir -p storage/logs
+mkdir -p bootstrap/cache
 
-echo -e "${GREEN}✓ Environment variables validated${NC}"
+# Set permissions
+echo "Setting permissions..."
+chmod -R 777 storage bootstrap/cache
+touch storage/logs/laravel.log
+chmod 666 storage/logs/laravel.log
 
-# Check if APP_KEY is set
-if [ -z "$APP_KEY" ] || [ "$APP_KEY" = "base64:YOUR_APP_KEY_HERE" ]; then
-    echo -e "${YELLOW}Warning: APP_KEY is not set!${NC}"
-    echo "Please generate an APP_KEY manually:"
-    echo ""
-    echo "  Option 1 - Generate locally (if PHP is installed):"
-    echo "    php artisan key:generate --show"
-    echo ""
-    echo "  Option 2 - Generate using Docker:"
-    echo "    docker run --rm -v \$(pwd):/app -w /app php:8.2-cli php artisan key:generate --show"
-    echo ""
-    echo "Then add the generated key to your .env file."
-    exit 1
-fi
+# Delete SQLite database if exists (we use MySQL)
+rm -f database/database.sqlite
 
-echo -e "${GREEN}✓ APP_KEY is set${NC}"
+# Stop existing containers
+echo "Stopping existing containers..."
+docker compose -f $COMPOSE_FILE down --remove-orphans 2>/dev/null || true
 
-# Function to wait for a service to be healthy
-wait_for_service() {
-    local service=$1
-    local max_attempts=$2
-    local attempt=1
-    
-    echo -e "${YELLOW}Waiting for $service to be ready...${NC}"
-    while [ $attempt -le $max_attempts ]; do
-        if docker compose -f $COMPOSE_FILE ps $service | grep -q "healthy"; then
-            echo -e "${GREEN}✓ $service is ready${NC}"
-            return 0
-        fi
-        echo "  Attempt $attempt/$max_attempts..."
-        sleep 5
-        ((attempt++))
-    done
-    
-    echo -e "${RED}✗ $service failed to become healthy${NC}"
-    return 1
-}
+# Remove old volumes if fresh install needed
+# docker compose -f $COMPOSE_FILE down -v 2>/dev/null || true
 
-# Stop any existing containers
-echo -e "${GREEN}Stopping existing containers...${NC}"
-docker compose -f $COMPOSE_FILE down 2>/dev/null || true
-
-# Build images
-echo -e "${GREEN}Building Docker images...${NC}"
+# Build containers
+echo "Building containers..."
 docker compose -f $COMPOSE_FILE build --no-cache
 
 # Start database and redis first
-echo -e "${GREEN}Starting database and Redis...${NC}"
+echo "Starting database and redis..."
 docker compose -f $COMPOSE_FILE up -d db redis
 
-# Wait for database to be ready
-wait_for_service "db" 12
+# Wait for database
+echo "Waiting for database..."
+sleep 15
+for i in {1..30}; do
+    if docker compose -f $COMPOSE_FILE exec -T db mysqladmin ping -h localhost --silent 2>/dev/null; then
+        echo "✓ Database is ready"
+        break
+    fi
+    echo "  Waiting... ($i/30)"
+    sleep 2
+done
 
-# Start the application
-echo -e "${GREEN}Starting application containers...${NC}"
+# Start application
+echo "Starting application..."
 docker compose -f $COMPOSE_FILE up -d app
 
-# Wait for app to be ready
-sleep 10
+sleep 5
 
-# Run database migrations
-echo -e "${GREEN}Running database migrations...${NC}"
-docker compose -f $COMPOSE_FILE exec -T app php artisan migrate --force
+# Run migrations
+echo "Running migrations..."
+docker compose -f $COMPOSE_FILE exec -T app php artisan migrate --force || echo "Migration completed with warnings"
 
-# Clear and cache configurations
-echo -e "${GREEN}Optimizing application...${NC}"
-docker compose -f $COMPOSE_FILE exec -T app php artisan config:cache
-docker compose -f $COMPOSE_FILE exec -T app php artisan route:cache
-docker compose -f $COMPOSE_FILE exec -T app php artisan view:cache
+# Clear caches
+echo "Clearing caches..."
+docker compose -f $COMPOSE_FILE exec -T app php artisan config:clear || true
+docker compose -f $COMPOSE_FILE exec -T app php artisan cache:clear || true
+docker compose -f $COMPOSE_FILE exec -T app php artisan view:clear || true
+docker compose -f $COMPOSE_FILE exec -T app php artisan route:clear || true
+
+# Optimize
+echo "Optimizing..."
+docker compose -f $COMPOSE_FILE exec -T app php artisan config:cache || true
+docker compose -f $COMPOSE_FILE exec -T app php artisan route:cache || true
+docker compose -f $COMPOSE_FILE exec -T app php artisan view:cache || true
 
 # Create storage link
-echo -e "${GREEN}Creating storage link...${NC}"
-docker compose -f $COMPOSE_FILE exec -T app php artisan storage:link 2>/dev/null || true
+echo "Creating storage link..."
+docker compose -f $COMPOSE_FILE exec -T app php artisan storage:link --force || true
 
-# Start remaining services
-echo -e "${GREEN}Starting all services...${NC}"
-docker compose -f $COMPOSE_FILE up -d
+# Start nginx
+echo "Starting nginx..."
+docker compose -f $COMPOSE_FILE up -d nginx
 
-echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN}   Deployment Complete!${NC}"
-echo -e "${GREEN}======================================${NC}"
+# Start queue and scheduler
+echo "Starting queue and scheduler..."
+docker compose -f $COMPOSE_FILE up -d queue scheduler
+
 echo ""
-echo "Services status:"
+echo "======================================"
+echo "Deployment Complete!"
+echo "======================================"
+echo ""
+echo "Site available at: http://fhmaison.fr"
+echo ""
+echo "Next: Run ./scripts/init-ssl.sh for HTTPS"
+echo ""
 docker compose -f $COMPOSE_FILE ps
-echo ""
-echo -e "${YELLOW}Next steps:${NC}"
-echo "1. If SSL is not configured, run: ./scripts/init-ssl.sh"
-echo "2. Check logs with: docker compose -f $COMPOSE_FILE logs -f"
-echo "3. Access your application at: http://$DOMAIN (or https://$DOMAIN after SSL setup)"

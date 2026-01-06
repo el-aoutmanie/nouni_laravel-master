@@ -1,115 +1,170 @@
 #!/bin/bash
-
-# ============================================================
-# SSL Certificate Initialization Script
-# This script obtains SSL certificates from Let's Encrypt
-# ============================================================
-
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+echo "======================================"
+echo "SSL Certificate Setup for fhmaison.fr"
+echo "======================================"
 
-# Configuration
 COMPOSE_FILE="docker-compose.prod.yml"
 
-# Check if .env file exists
-if [ ! -f .env ]; then
-    echo -e "${RED}Error: .env file not found!${NC}"
-    echo "Please copy .env.production to .env and configure it first."
-    exit 1
+# Load environment variables
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
 fi
 
-# Source the .env file to get variables
-export $(grep -v '^#' .env | xargs)
+DOMAIN=${DOMAIN:-fhmaison.fr}
+EMAIL=${CERTBOT_EMAIL:-admin@fhmaison.fr}
+STAGING=${CERTBOT_STAGING:-0}
 
-# Validate required variables
-if [ -z "$DOMAIN" ]; then
-    echo -e "${RED}Error: DOMAIN is not set in .env file!${NC}"
-    exit 1
-fi
+echo "Domain: $DOMAIN"
+echo "Email: $EMAIL"
 
-if [ -z "$CERTBOT_EMAIL" ]; then
-    echo -e "${RED}Error: CERTBOT_EMAIL is not set in .env file!${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}======================================${NC}"
-echo -e "${GREEN}SSL Certificate Setup for $DOMAIN${NC}"
-echo -e "${GREEN}======================================${NC}"
-
-# Check if certificate already exists
-if [ -d "./certbot/conf/live/$DOMAIN" ]; then
-    echo -e "${YELLOW}Certificate already exists for $DOMAIN${NC}"
-    read -p "Do you want to renew/recreate it? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Exiting without changes."
-        exit 0
-    fi
-fi
-
-# Create directories if they don't exist
-echo -e "${GREEN}Creating required directories...${NC}"
-mkdir -p ./certbot/conf
-mkdir -p ./certbot/www
-
-# Stop any running containers
-echo -e "${GREEN}Stopping existing containers...${NC}"
-docker compose -f $COMPOSE_FILE down 2>/dev/null || true
-
-# Start only nginx for initial certificate request
-echo -e "${GREEN}Starting nginx for certificate verification...${NC}"
+# Make sure nginx is running
+echo "Ensuring nginx is running..."
 docker compose -f $COMPOSE_FILE up -d nginx
+sleep 3
 
-# Wait for nginx to start
-echo -e "${GREEN}Waiting for nginx to start...${NC}"
-sleep 5
+# Test if domain is reachable
+echo "Testing domain accessibility..."
+curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" http://${DOMAIN}/ || echo "Could not reach domain (this might be OK)"
 
-# Check if this is a staging/test run
-STAGING_ARG=""
-if [ "$CERTBOT_STAGING" = "1" ] || [ "$CERTBOT_STAGING" = "true" ]; then
-    echo -e "${YELLOW}Using Let's Encrypt staging server (test certificates)${NC}"
-    STAGING_ARG="--staging"
+# Prepare staging flag
+STAGING_FLAG=""
+if [ "$STAGING" = "1" ]; then
+    STAGING_FLAG="--staging"
+    echo "Using Let's Encrypt STAGING server (test certificates)"
 fi
 
-# Request certificate using certbot
-echo -e "${GREEN}Requesting SSL certificate from Let's Encrypt...${NC}"
+# Request certificate
+echo ""
+echo "Requesting SSL certificate from Let's Encrypt..."
+echo ""
+
 docker compose -f $COMPOSE_FILE run --rm certbot certonly \
     --webroot \
     --webroot-path=/var/www/certbot \
-    --email $CERTBOT_EMAIL \
+    --email ${EMAIL} \
     --agree-tos \
     --no-eff-email \
-    $STAGING_ARG \
-    -d $DOMAIN \
-    -d www.$DOMAIN
+    --force-renewal \
+    -d ${DOMAIN} \
+    -d www.${DOMAIN} \
+    ${STAGING_FLAG}
 
-# Check if certificate was obtained successfully
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}Certificate obtained successfully!${NC}"
+    echo ""
+    echo "✓ SSL certificate obtained successfully!"
+    echo ""
+    echo "Now updating nginx configuration for HTTPS..."
     
-    # Generate the production nginx config with domain substitution
-    echo -e "${GREEN}Generating production nginx configuration...${NC}"
-    envsubst '${DOMAIN}' < ./docker/nginx/nginx.prod.conf.template > ./docker/nginx/nginx.prod.conf
-    
-    # Restart nginx to apply SSL configuration
-    echo -e "${GREEN}Restarting nginx with SSL configuration...${NC}"
+    # Create HTTPS nginx config
+    cat > docker/nginx/nginx.prod.conf << 'NGINXEOF'
+# HTTP - Redirect to HTTPS
+server {
+    listen 80;
+    listen [::]:80;
+    server_name fhmaison.fr www.fhmaison.fr;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        allow all;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name fhmaison.fr www.fhmaison.fr;
+
+    ssl_certificate /etc/letsencrypt/live/fhmaison.fr/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/fhmaison.fr/privkey.pem;
+
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    root /var/www/html/public;
+    index index.php index.html;
+    charset utf-8;
+
+    # Block sensitive files
+    location ~ /\.env { deny all; return 404; }
+    location ~ /\.(git|svn|htaccess) { deny all; return 404; }
+    location ~* \.(bak|config|sql|log|sh|yml|yaml|lock)$ { deny all; return 404; }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+
+    error_page 404 /index.php;
+
+    location ~ \.php$ {
+        fastcgi_pass app:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_hide_header X-Powered-By;
+    }
+
+    location /storage {
+        alias /var/www/html/storage/app/public;
+    }
+
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|svg|eot)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css text/xml application/json application/javascript application/rss+xml application/atom+xml image/svg+xml;
+}
+NGINXEOF
+
+    # Restart nginx with new config
+    echo "Restarting nginx..."
     docker compose -f $COMPOSE_FILE restart nginx
     
-    echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}SSL Setup Complete!${NC}"
-    echo -e "${GREEN}======================================${NC}"
-    echo -e "Your site is now available at:"
-    echo -e "  ${GREEN}https://$DOMAIN${NC}"
-    echo -e "  ${GREEN}https://www.$DOMAIN${NC}"
     echo ""
-    echo -e "${YELLOW}Note: Certificates will be automatically renewed by the certbot container.${NC}"
+    echo "======================================"
+    echo "SSL Setup Complete!"
+    echo "======================================"
+    echo ""
+    echo "Your site is now available at:"
+    echo "  https://fhmaison.fr"
+    echo "  https://www.fhmaison.fr"
+    echo ""
+    echo "HTTP automatically redirects to HTTPS"
+    echo ""
 else
-    echo -e "${RED}Failed to obtain certificate!${NC}"
-    echo "Please check the error messages above."
+    echo ""
+    echo "ERROR: Failed to obtain SSL certificate!"
+    echo ""
+    echo "Common issues:"
+    echo "1. Domain DNS not pointing to this server"
+    echo "2. Port 80 blocked by firewall"
+    echo "3. Rate limit exceeded (try CERTBOT_STAGING=1)"
+    echo ""
     exit 1
 fi
