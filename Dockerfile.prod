@@ -48,8 +48,11 @@ RUN chown -R www-data:www-data /var/www/html \
 # Install PHP dependencies (production)
 RUN composer install --optimize-autoloader --no-dev --no-interaction --prefer-dist
 
-# Install Node dependencies and build assets
-RUN npm ci --only=production && npm run build
+# Install ALL Node dependencies (including devDependencies for build)
+RUN npm ci
+
+# Build assets
+RUN npm run build
 
 # Remove node_modules after build to reduce image size
 RUN rm -rf node_modules
